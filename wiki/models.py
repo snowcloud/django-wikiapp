@@ -11,12 +11,9 @@ from django.contrib.auth.models import User
 from django.utils.translation import ugettext_lazy as _
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.contenttypes import generic
-from django.db.models.query import QuerySet
 
 from tagging.fields import TagField
 from tagging.models import Tag
-
-from wiki.utils import get_ct
 
 try:
     from notification import models as notification
@@ -36,23 +33,11 @@ try:
     markup_choices = settings.WIKI_MARKUP_CHOICES
 except AttributeError:
     markup_choices = (
-        ('creole', _(u'Creole')),
-        ('restructuredtext', _(u'reStructuredText')),
-        ('textile', _(u'Textile')),
-        ('markdown', _(u'Markdown')),
+        ('crl', _(u'Creole')),
+        ('rst', _(u'reStructuredText')),
+        ('txl', _(u'Textile')),
+        ('mrk', _(u'Markdown')),
     )
-
-
-# Avoid boilerplate defining our own querysets
-class QuerySetManager(models.Manager):
-    def get_query_set(self):
-        return self.model.QuerySet(self.model)
-
-
-class NonRemovedArticleManager(QuerySetManager):
-    def get_query_set(self):
-        q = super(NonRemovedArticleManager, self).get_query_set()
-        return q.filter(removed=False)
 
 
 class Article(models.Model):
@@ -71,7 +56,6 @@ class Article(models.Model):
                                        blank=True, null=True)
     created_at = models.DateTimeField(default=datetime.now)
     last_update = models.DateTimeField(blank=True, null=True)
-    removed = models.BooleanField(_("Is removed?"), default=False)
 
     content_type = models.ForeignKey(ContentType, null=True)
     object_id = models.PositiveIntegerField(null=True)
@@ -79,17 +63,6 @@ class Article(models.Model):
 
     tags = TagField()
 
-    objects = QuerySetManager()
-
-    non_removed_objects = NonRemovedArticleManager()
-
-    class QuerySet(QuerySet):
-
-        def get_by(self, title, group=None):
-            if group is None:
-                return self.get(title=title)
-            return group.get_related_objects(self.filter(title=title)).get()
-            
     class Meta:
         verbose_name = _(u'Article')
         verbose_name_plural = _(u'Articles')
@@ -99,23 +72,9 @@ class Article(models.Model):
             return reverse('wiki_article', args=(self.title,))
         return self.group.get_absolute_url() + 'wiki/' + self.title
 
-    def save(self, force_insert=False, force_update=False):
+    def save(self, *args, **kwargs):
         self.last_update = datetime.now()
-        super(Article, self).save(force_insert, force_update)
-
-    def remove(self):
-        """ Mark the Article as 'removed'. If the article is
-        already removed, delete it.
-        Returns True if the article was deleted, False when just marked
-        as removed.
-        """
-        if self.removed:
-            self.delete()
-            return True
-        else:
-            self.removed = True
-            self.save()
-            return False
+        super(Article, self).save(*args, **kwargs)
 
     def latest_changeset(self):
         try:
@@ -158,11 +117,21 @@ class Article(models.Model):
         return self.title
 
 
-class NonRevertedChangeSetManager(QuerySetManager):
+
+class ChangeSetManager(models.Manager):
+
+    def all_later(self, revision):
+        """ Return all changes later to the given revision.
+        Util when we want to revert to the given revision.
+        """
+        return self.filter(revision__gt=int(revision))
+
+
+class NonRevertedChangeSetManager(ChangeSetManager):
 
     def get_default_queryset(self):
-        super(NonRevertedChangeSetManager, self).get_query_set().filter(
-              reverted=False)
+        super(PublishedBookManager, self).get_query_set().filter(
+            reverted=False)
 
 
 class ChangeSet(models.Model):
@@ -189,16 +158,8 @@ class ChangeSet(models.Model):
     modified = models.DateTimeField(_(u"Modified at"), default=datetime.now)
     reverted = models.BooleanField(_(u"Reverted Revision"), default=False)
 
-    objects = QuerySetManager()
+    objects = ChangeSetManager()
     non_reverted_objects = NonRevertedChangeSetManager()
-
-    class QuerySet(QuerySet):
-        def all_later(self, revision):
-            """ Return all changes later to the given revision.
-            Util when we want to revert to the given revision.
-            """
-            return self.filter(revision__gt=int(revision))
-
 
     class Meta:
         verbose_name = _(u'Change set')
@@ -266,7 +227,7 @@ class ChangeSet(models.Model):
             notification.send([self.editor], "wiki_revision_reverted",
                               {'revision': self, 'article': self.article})
 
-    def save(self, force_insert=False, force_update=False):
+    def save(self, *args, **kwargs):
         """ Saves the article with a new revision.
         """
         if self.id is None:
@@ -275,7 +236,7 @@ class ChangeSet(models.Model):
                     article=self.article).latest().revision + 1
             except self.DoesNotExist:
                 self.revision = 1
-        super(ChangeSet, self).save(force_insert, force_update)
+        super(ChangeSet, self).save(*args, **kwargs)
 
     def display_diff(self):
         ''' Returns a HTML representation of the diff.
